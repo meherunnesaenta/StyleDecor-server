@@ -5,6 +5,16 @@ require('dotenv').config();
 const { MongoClient, ServerApiVersion } = require('mongodb');
 
 const port = process.env.PORT || 3000;
+const admin = require('firebase-admin');
+
+
+const decoded = Buffer.from(process.env.FB_Service_Key, 'base64').toString(
+  'utf-8'
+)
+const serviceAccount = JSON.parse(decoded)
+admin.initializeApp({
+  credential: admin.credential.cert(serviceAccount),
+})
 
 
 // middleware
@@ -27,11 +37,11 @@ const verifyJWT = async (req, res, next) => {
   }
 }
 
-const uri = `mongodb+srv://${process.env.DB_USER}:${process.env.DB_PASSWORD}@cluster0.chnqfjs.mongodb.net/?appName=Cluster0`;
 
 
 
-const client = new MongoClient(uri, {
+
+const client = new MongoClient(process.env.MONGODB_URI, {
   serverApi: {
     version: ServerApiVersion.v1,
     strict: true,
@@ -42,6 +52,8 @@ async function run() {
   try {
     // Connect the client to the server	(optional starting in v4.7)
     await client.connect();
+    const serviceCollection = client.db('styleDecor').collection('services');
+    const reviewCollection = client.db('styleDecor').collection('reviews');
 
 
     

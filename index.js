@@ -55,13 +55,13 @@ async function run() {
     const serviceCollection = client.db('styleDecor').collection('services');
     const reviewCollection = client.db('styleDecor').collection('reviews');
 
-    app.post('/service',async(req,res)=>{
+    app.post('/service',verifyJWT, async(req,res)=>{
       const service = req.body;
       const result = await serviceCollection.insertOne(service);
       res.send(result);
     })
 
-    app.get('/service',async(req,res)=>{
+    app.get('/service',verifyJWT, async(req,res)=>{
       const result= await serviceCollection.find().toArray();
       res.send(result);
     })

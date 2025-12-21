@@ -4,12 +4,28 @@ const app = express();
 require('dotenv').config();
 const { MongoClient, ServerApiVersion } = require('mongodb');
 
-const port = process.env.PORT || 3000
+const port = process.env.PORT || 3000;
+
 
 // middleware
 app.use(express.json());
 app.use(cors());
 
+
+const verifyJWT = async (req, res, next) => {
+  const token = req?.headers?.authorization?.split(' ')[1]
+  console.log(token)
+  if (!token) return res.status(401).send({ message: 'Unauthorized Access!' })
+  try {
+    const decoded = await admin.auth().verifyIdToken(token)
+    req.tokenEmail = decoded.email
+    console.log(decoded)
+    next()
+  } catch (err) {
+    console.log(err)
+    return res.status(401).send({ message: 'Unauthorized Access!', err })
+  }
+}
 
 const uri = `mongodb+srv://${process.env.DB_USER}:${process.env.DB_PASSWORD}@cluster0.chnqfjs.mongodb.net/?appName=Cluster0`;
 
@@ -26,6 +42,9 @@ async function run() {
   try {
     // Connect the client to the server	(optional starting in v4.7)
     await client.connect();
+
+
+    
     // Send a ping to confirm a successful connection
     await client.db("admin").command({ ping: 1 });
     console.log("Pinged your deployment. You successfully connected to MongoDB!");

@@ -51,11 +51,20 @@ const client = new MongoClient(process.env.MONGODB_URI, {
 async function run() {
   try {
     // Connect the client to the server	(optional starting in v4.7)
-    await client.connect();
+    // await client.connect();
     const serviceCollection = client.db('styleDecor').collection('services');
     const reviewCollection = client.db('styleDecor').collection('reviews');
 
+    app.post('/service',async(req,res)=>{
+      const service = req.body;
+      const result = await serviceCollection.insertOne(service);
+      res.send(result);
+    })
 
+    app.get('/service',async(req,res)=>{
+      const result= await serviceCollection.find().toArray();
+      res.send(result);
+    })
     
     // Send a ping to confirm a successful connection
     await client.db("admin").command({ ping: 1 });

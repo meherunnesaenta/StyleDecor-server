@@ -2,7 +2,7 @@ const express = require('express')
 const cors = require('cors');
 const app = express();
 require('dotenv').config();
-const { MongoClient, ServerApiVersion } = require('mongodb');
+const { MongoClient, ServerApiVersion, ObjectId } = require('mongodb');
 
 const port = process.env.PORT || 3000;
 const admin = require('firebase-admin');
@@ -55,17 +55,48 @@ async function run() {
     const serviceCollection = client.db('styleDecor').collection('services');
     const reviewCollection = client.db('styleDecor').collection('reviews');
 
-    app.post('/service',verifyJWT, async(req,res)=>{
+    app.post('/service', verifyJWT, async (req, res) => {
       const service = req.body;
       const result = await serviceCollection.insertOne(service);
       res.send(result);
     })
 
-    app.get('/service',verifyJWT, async(req,res)=>{
-      const result= await serviceCollection.find().toArray();
+    app.get('/service', verifyJWT, async (req, res) => {
+      const result = await serviceCollection.find().toArray();
       res.send(result);
     })
+
     
+
+app.get('/service/:id', async (req, res) => {
+  try {
+    const id = req.params.id;
+
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).json({ message: 'Invalid ID format' });
+    }
+
+    const query = { _id: new ObjectId(id) };
+    const result = await serviceCollection.findOne(query);
+
+    if (!result) {
+      return res.status(404).json({ message: 'Service not found' });
+    }
+
+    result._id = result._id.toString();
+
+    res.json(result);
+  } catch (error) {
+    console.error('Error fetching single service:', error);
+    res.status(500).json({ message: 'Server error', details: error.message });
+  }
+});
+
+
+
+
+
+
     // Send a ping to confirm a successful connection
     await client.db("admin").command({ ping: 1 });
     console.log("Pinged your deployment. You successfully connected to MongoDB!");
@@ -81,9 +112,9 @@ run().catch(console.dir);
 
 
 app.get('/', (req, res) => {
-    res.send('StyleDecor server is running!')
+  res.send('StyleDecor server is running!')
 })
 
 app.listen(port, () => {
-    console.log(`Example app listening on port ${port}`)
+  console.log(`Example app listening on port ${port}`)
 })

@@ -3,6 +3,8 @@ const cors = require('cors');
 const app = express();
 require('dotenv').config();
 const { MongoClient, ServerApiVersion, ObjectId } = require('mongodb');
+const stripe = require('stripe')(process.env.SRIPE_SECRET);
+
 
 const port = process.env.PORT || 3000;
 const admin = require('firebase-admin');
@@ -90,6 +92,44 @@ app.get('/service/:id', async (req, res) => {
     console.error('Error fetching single service:', error);
     res.status(500).json({ message: 'Server error', details: error.message });
   }
+});
+
+
+
+
+
+// payment 
+
+app.post('/create-booking-session', verifyJWT, async (req, res) => {
+  const bookingInfo = req.body;
+
+  const line_items = [{
+    price_data: {
+      currency: 'bdt',
+      product_data: {
+        name: bookingInfo.serviceName,
+        images: [bookingInfo.serviceImage],
+      },
+      unit_amount: bookingInfo.price * 100, 
+    },
+    quantity: 1,
+  }];
+
+  const session = await stripe.checkout.sessions.create({
+    payment_method_types: ['card'],
+    line_items,
+    mode: 'payment',
+    success_url: `${process.env.SITE_DOMAIN}/booking-success?success=true&session_id={CHECKOUT_SESSION_ID}`,
+    cancel_url: `${process.env.SITE_DOMAIN}/services`,
+    metadata: {
+      serviceId: bookingInfo.serviceId,
+      customerEmail: bookingInfo.customer.email,
+ 
+    },
+  });
+
+
+  res.send({ url: session.url});
 });
 
 

@@ -103,33 +103,82 @@ app.get('/service/:id', async (req, res) => {
 app.post('/create-booking-session', verifyJWT, async (req, res) => {
   const bookingInfo = req.body;
 
-  const line_items = [{
-    price_data: {
-      currency: 'bdt',
-      product_data: {
-        name: bookingInfo.serviceName,
-        images: [bookingInfo.serviceImage],
+  
+  const baseUrl = process.env.CLIENT_URL || 'http://localhost:5173';
+
+  try {
+    const session = await stripe.checkout.sessions.create({
+      payment_method_types: ['card'],
+      line_items: [{
+        price_data: {
+          currency: 'usd',
+          product_data: {
+            name: bookingInfo.serviceName,
+            images: bookingInfo.serviceImage ? [bookingInfo.serviceImage] : [],
+          },
+          unit_amount: Math.round(bookingInfo.price * 100),
+        },
+        quantity: 1,
+      }],
+      mode: 'payment',
+      success_url: `${baseUrl}/booking-success?session_id={CHECKOUT_SESSION_ID}`,
+      cancel_url: `${baseUrl}/services`,
+      metadata: {
+        serviceId: bookingInfo.serviceId,
+        customerEmail: bookingInfo.customer.email,
+        customerName: bookingInfo.customer.name || '',
+        bookingDate: bookingInfo.bookingDate,
+        location: bookingInfo.location,
+        originalPriceBDT: bookingInfo.price,
       },
-      unit_amount: bookingInfo.price * 100, 
-    },
-    quantity: 1,
-  }];
+    });
 
-  const session = await stripe.checkout.sessions.create({
-    payment_method_types: ['card'],
-    line_items,
-    mode: 'payment',
-    success_url: `${process.env.SITE_DOMAIN}/booking-success?success=true&session_id={CHECKOUT_SESSION_ID}`,
-    cancel_url: `${process.env.SITE_DOMAIN}/services`,
-    metadata: {
-      serviceId: bookingInfo.serviceId,
-      customerEmail: bookingInfo.customer.email,
- 
-    },
-  });
+    res.send({ url: session.url });
+  } catch (error) {
+    console.error('Stripe error:', error);
+    res.status(500).send({ message: error.message || 'Payment session failed' });
+  }
+});
 
 
-  res.send({ url: session.url});
+// নতুন route: success page থেকে call হবে, data verify + store করবে
+app.post('/payment-success', verifyJWT, async (req, res) => {
+  const { sessionId } = req.body;
+
+  if (!sessionId) {
+    return res.status(400).json({ success: false, message: 'No session ID' });
+  }
+
+  try {
+    // Stripe session retrieve করে verify করো
+    const session = await stripe.checkout.sessions.retrieve(sessionId);
+
+    if (session.payment_status === 'paid') {
+      // এখানে database-এ booking save করো (তোমার bookingCollection)
+      const bookingData = {
+        serviceId: session.metadata.serviceId,
+        customerEmail: session.metadata.customerEmail,
+        customerName: req.tokenEmail || 'Unknown', // verifyJWT থেকে
+        amount: session.amount_total / 100,
+        currency: session.currency,
+        stripeSessionId: sessionId,
+        paymentIntentId: session.payment_intent,
+        status: 'confirmed',
+        bookedAt: new Date(),
+        // অন্যান্য fields যোগ করো (bookingDate, location ইত্যাদি)
+      };
+
+      // bookingCollection.insertOne(bookingData); // তোমার collection name দিয়ে
+      // res.send({ success: true, message: 'Booking saved' });
+
+      res.json({ success: true });
+    } else {
+      res.json({ success: false, message: 'Payment not completed' });
+    }
+  } catch (error) {
+    console.error('Payment verification error:', error);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
 });
 
 

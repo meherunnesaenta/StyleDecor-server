@@ -21,7 +21,13 @@ admin.initializeApp({
 
 // middleware
 app.use(express.json());
-app.use(cors());
+const corsOptions = {
+  origin: process.env.CLIENT_URL || 'http://localhost:5173',
+  credentials: true,
+  optionsSuccessStatus: 200
+};
+
+app.use(cors(corsOptions));
 
 
 const verifyJWT = async (req, res, next) => {
@@ -58,6 +64,7 @@ async function run() {
     const bookingCollection = client.db('styleDecor').collection('bookings');
     const usersCollection = client.db('styleDecor').collection('users');
     const decoratorRequestsCollection = client.db('styleDecor').collection('decoratorRequests');
+    const decoratorCollectoin = client.db('styledecor').collection('decorator')
 
     app.post('/service', async (req, res) => {
       const service = req.body;
@@ -184,78 +191,107 @@ async function run() {
     });
 
 
-    // Public route for home page services
-app.get('/services', async (req, res) => {
-  try {
-    const result = await serviceCollection.find({ isActive: true }).toArray();
-    res.send(result);
-  } catch (error) {
-    res.status(500).send({ message: 'Error fetching services' });
-  }
-});
-
-
-
-// Public route for top decorators
-app.get('/top-decorators', async (req, res) => {
-  try {
-    const decorators = await userCollection
-      .find({ role: 'decorator' })
-      .limit(8)
-      .toArray();
-
-    res.send(decorators);
-  } catch (error) {
-    res.status(500).send({ message: 'Error fetching decorators' });
-  }
-});
-
-
-
-app.post('/payment-success', verifyJWT, async (req, res) => {
+app.post('/payment-success', async (req, res) => {
   const { sessionId } = req.body;
 
-  const session = await stripe.checkout.sessions.retrieve(sessionId);
-
-  if (session.payment_status !== 'paid') {
-    return res.status(400).send({ message: 'Payment not completed' });
+  if (!sessionId) {
+    return res.status(400).send({ message: 'Session ID is required' });
   }
 
-  const booking = {
-    stripeSessionId: session.id,
-    serviceName: session.metadata.serviceName,
-    serviceId: session.metadata.serviceId,
-    serviceImage: session.metadata.serviceImage,
-    customerEmail: session.metadata.customerEmail,
-    customerName: session.metadata.customerName,
-    bookingDate: session.metadata.bookingDate,
-    location: session.metadata.location,
-    serviceMode: session.metadata.serviceMode,
-    originalPriceBDT: session.metadata.originalPriceBDT,
-    paidAmountUSD: session.amount_total / 100,
-    status: 'confirmed',
-    createdAt: new Date(),
-  };
+  try {
+    const session = await stripe.checkout.sessions.retrieve(sessionId);
 
-  await bookingsCollection.insertOne(booking);
+    if (session.payment_status !== 'paid') {
+      return res.status(400).send({ message: 'Payment not completed' });
+    }
 
-  res.send({ success: true });
+    const existingBooking = await bookingCollection.findOne({ stripeSessionId: session.id });
+    if (existingBooking) {
+      return res.send({ success: true, message: 'Booking already confirmed' });
+    }
+
+    // ← এখানে service details fetch করো
+    let serviceDetails = null;
+    if (session.metadata.serviceId) {
+      serviceDetails = await serviceCollection.findOne({
+        _id: new ObjectId(session.metadata.serviceId)
+      });
+    }
+
+    const booking = {
+      stripeSessionId: session.id,
+      serviceId: session.metadata.serviceId,
+      serviceName: serviceDetails?.service_name || 'Service Name Not Available',
+      serviceImage: serviceDetails?.image || 'https://via.placeholder.com/150?text=No+Image',
+      customerEmail: session.metadata.customerEmail,
+      customerName: session.metadata.customerName || 'Guest',
+      bookingDate: session.metadata.bookingDate,
+      location: session.metadata.location,
+      serviceMode: session.metadata.serviceMode,
+      unit: session.metadata.unit,
+      originalPriceBDT: Number(session.metadata.originalPriceBDT),
+      paidAmountUSD: session.amount_total / 100,
+      status: 'paid',
+      createdAt: new Date(),
+      paidAt: new Date(),
+    };
+
+    const result = await bookingCollection.insertOne(booking);
+    console.log('Booking saved:', result.insertedId);
+
+    res.send({ success: true });
+  } catch (error) {
+    console.error('Payment success error:', error);
+    res.status(500).send({ message: 'Failed to confirm booking' });
+  }
 });
 
+    // Public route for home page services
+    app.get('/services', async (req, res) => {
+      try {
+        const result = await serviceCollection.find({ isActive: true }).toArray();
+        res.send(result);
+      } catch (error) {
+        res.status(500).send({ message: 'Error fetching services' });
+      }
+    });
+
+
+    app.get('/top-decorators', async (req, res) => {
+      try {
+        const decorators = await usersCollection
+          .find({ role: 'decorator' })
+          .limit(4)
+          .toArray();
+
+        res.send(decorators);
+      } catch (error) {
+        console.error('Error fetching top decorators:', error);
+        res.status(500).send({ message: 'Error fetching decorators' });
+      }
+    });
 
 
 
 
-app.get('/my-bookings', verifyJWT, async (req, res) => {
-  const email = req.tokenEmail;
 
-  const bookings = await bookingsCollection
-    .find({ customerEmail: email })
-    .sort({ createdAt: -1 })
-    .toArray();
 
-  res.send(bookings);
-});
+    // User-এর নিজের bookings দেখার route
+    app.get('/my-bookings', verifyJWT, async (req, res) => {
+      const email = req.tokenEmail; // logged in user-এর email
+
+      try {
+        const bookings = await bookingCollection
+          .find({ customerEmail: email })
+          .sort({ createdAt: -1 })
+          .toArray();
+
+        res.send(bookings);
+      } catch (error) {
+        console.error('Error fetching my bookings:', error);
+        res.status(500).send({ message: 'Failed to load bookings' });
+      }
+    });
 
 
 

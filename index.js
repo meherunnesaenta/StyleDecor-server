@@ -34,7 +34,6 @@ app.use(cors(corsOptions));
 const verifyJWT = async (req, res, next) => {
   const token = req?.headers?.authorization?.split(' ')[1];
 
-  console.log('[verifyJWT] Token received:', token ? 'YES (length: ' + token.length + ')' : 'NO TOKEN');
 
   if (!token) {
     console.log('[verifyJWT] → 401 No token');
@@ -45,16 +44,8 @@ const verifyJWT = async (req, res, next) => {
     const decoded = await admin.auth().verifyIdToken(token);
     req.tokenEmail = decoded.email;
 
-    console.log('[verifyJWT] Token verified successfully → email:', decoded.email);
-    console.log('[verifyJWT] Full decoded payload:', JSON.stringify(decoded, null, 2).slice(0, 300) + '...'); // optional, truncate if too long
-
     next();
   } catch (err) {
-    console.error('[verifyJWT] FAILED for URL:', req.originalUrl);
-    console.error('[verifyJWT] Token (first 20):', token?.substring(0, 20) || 'NO TOKEN');
-    console.error('[verifyJWT] Error code:', err.code);
-    console.error('[verifyJWT] Error message:', err.message);
-    console.error('[verifyJWT] Full error:', JSON.stringify(err, null, 2));
 
     return res.status(401).send({
       message: 'Token verification failed',
@@ -63,6 +54,7 @@ const verifyJWT = async (req, res, next) => {
     });
   }
 };
+
 
 
 
@@ -87,6 +79,15 @@ async function run() {
     const decoratorCollection = client.db('styleDecor').collection('decorator')
     const paymentCollection = client.db('styleDecor').collection('payments');
 
+    // verify admin middleware
+    const verifyAdmin = async (req, res, next) => {
+      const email = req.tokenEmail;
+      const user = await usersCollection.findOne({ email });
+      if (user?.role !== 'admin' || !user) {
+        return res.status(403).send({ message: 'Forbidden' });
+      }
+      next();
+    };
     app.post('/service', async (req, res) => {
       const service = req.body;
       const result = await serviceCollection.insertOne(service);
@@ -126,69 +127,64 @@ async function run() {
 
     // User-এর নিজের Payment History (শুধু paid bookings)
     app.get('/my-payments', verifyJWT, async (req, res) => {
-  const email = req.tokenEmail;
+      const email = req.tokenEmail;
 
-  try {
-    const payments = await paymentCollection
-      .find({ customerEmail: email })
-      .sort({ paidAt: -1 }) // newest first
-      .toArray();
+      try {
+        const payments = await paymentCollection
+          .find({ customerEmail: email })
+          .sort({ paidAt: -1 }) // newest first
+          .toArray();
 
-    console.log(`[GET /my-payments] Found ${payments.length} payments for ${email}`);
-    res.send(payments);
-  } catch (err) {
-    console.error("My payments error:", err);
-    res.status(500).send({ message: 'Failed to load your payment history' });
-  }
-});
-
-
-
-    app.get('/manage-bookings', verifyJWT, async (req, res) => {
-      const adminUser = await usersCollection.findOne({
-        email: req.tokenEmail
-      });
-
-      if (adminUser?.role !== 'admin') {
-        return res.status(403).send({ message: 'Forbidden' });
+        console.log(`[GET /my-payments] Found ${payments.length} payments for ${email}`);
+        res.send(payments);
+      } catch (err) {
+        console.error("My payments error:", err);
+        res.status(500).send({ message: 'Failed to load your payment history' });
       }
+    });
 
-      const bookings = await bookingCollection
-        .find()
-        .sort({ createdAt: -1 })
-        .toArray();
 
+
+    app.get('/manage-bookings', verifyJWT, verifyAdmin, async (req, res) => {
+      const query = {};
+      const { email } = req.query;
+      if (email) {
+        query.customerEmail = email;
+      }
+      const options = { sort: { createdAt: -1 } };
+      const cursor = bookingCollection.find(query, options);
+      const bookings = await cursor.toArray();
       res.send(bookings);
     });
 
-// Admin - All Payments from paymentCollection
-app.get('/admin/payments', verifyJWT, async (req, res) => {
-  const adminUser = await usersCollection.findOne({ email: req.tokenEmail });
+    // Admin - All Payments from paymentCollection
+    app.get('/admin/payments', verifyJWT, async (req, res) => {
+      const adminUser = await usersCollection.findOne({ email: req.tokenEmail });
 
-  if (!adminUser || adminUser.role !== 'admin') {
-    return res.status(403).send({ message: 'Admin access required' });
-  }
+      if (!adminUser || adminUser.role !== 'admin') {
+        return res.status(403).send({ message: 'Admin access required' });
+      }
 
-  try {
-    const payments = await paymentCollection
-      .find({})
-      .sort({ paidAt: -1 })
-      .toArray();
+      try {
+        const payments = await paymentCollection
+          .find({})
+          .sort({ paidAt: -1 })
+          .toArray();
 
-    console.log(`[GET /admin/payments] Found ${payments.length} payments`);
+        console.log(`[GET /admin/payments] Found ${payments.length} payments`);
 
-    res.send(payments);
-  } catch (err) {
-    console.error('Error fetching payments:', err);
-    res.status(500).send({ message: 'Failed to load payment history' });
-  }
-});
+        res.send(payments);
+      } catch (err) {
+        console.error('Error fetching payments:', err);
+        res.status(500).send({ message: 'Failed to load payment history' });
+      }
+    });
 
 
     // User role fetch route
     app.post('/users', async (req, res) => {
       const user = req.body;
-      user.role = 'user'; 
+      user.role = 'user';
       user.createdAt = new Date();
       const email = user.email;
       const existingUser = await usersCollection.findOne({ email });
@@ -200,249 +196,229 @@ app.get('/admin/payments', verifyJWT, async (req, res) => {
       res.send(result);
     });
 
-    app.get('/users/:email/role', verifyJWT, async (req, res) => {
+    app.get('/users', async (req, res) => {
+      const searchText = req.query.searchText;
+      const query = {};
+
+      if (searchText) {
+
+        query.$or = [
+          { displayName: { $regex: searchText, $options: 'i' } },
+          { email: { $regex: searchText, $options: 'i' } },
+        ]
+
+      }
+
+      const cursor = usersCollection.find(query).sort({ createdAt: -1 }).limit(5);
+      const result = await cursor.toArray();
+      res.send(result);
+    })
+
+    app.get('/users/:email/role', async (req, res) => {
       const email = req.params.email;
 
-      if (req.tokenEmail !== email) {
-        return res.status(403).send({ message: 'Forbidden' });
-      }
+      const query = { email };
+      const user = await usersCollection.findOne(query);
+      res.send({ role: user?.role || 'user' });
 
-      try {
-        const user = await usersCollection.findOne({ email });
-        res.send({ role: user?.role || 'user' });
-      } catch (error) {
-        res.status(500).send({ message: 'Server error' });
-      }
     });
 
-
-    app.post('/become-decorator', verifyJWT, async (req, res) => {
-      const { name, phone, experience, portfolio } = req.body;
-      const email = req.tokenEmail;
-
-      console.log('[POST /become-decorator] Request from:', email);
-      console.log('[POST /become-decorator] Payload:', { name, phone, experience, portfolio });
-
-      const alreadyExists = await decoratorRequestsCollection.findOne({ email });
-
-      if (alreadyExists) {
-        console.log('[409] → Already applied for:', email);
-        return res.status(409).send({ message: 'Already applied. Please wait.' });
+    app.patch('/users/:id/role', verifyJWT, verifyAdmin, async (req, res) => {
+      const id = req.params.id;
+      const { role } = req.body;
+      const quey = { _id: new ObjectId(id) };
+      const updateDoc = {
+        $set: {
+          role: role
+        }
       }
+      const result = await usersCollection.updateOne(quey, updateDoc);
+      res.send(result);
+    })
 
-      const application = {
-        name,
-        email,
+
+    // Become Decorator Application (User applies to become decorator)
+    app.post('/decorator', verifyJWT, async (req, res) => {
+      const {
+        fullName,
         phone,
         experience,
         portfolio,
-        status: 'pending',
-        appliedAt: new Date(),
-      };
+        region,
+        district,
+        specialization,
+        bio
+      } = req.body;
 
-      console.log('[inserting new application] →', application);
-
-      const result = await decoratorRequestsCollection.insertOne(application);
-
-      console.log('[insert success] insertedId:', result.insertedId);
-
-      res.send({ success: true, insertedId: result.insertedId });
-    });
-
-    // Daily Revenue (last 30 days)
-    app.get('/revenue/daily', verifyJWT, async (req, res) => {
-      const adminUser = await usersCollection.findOne({ email: req.tokenEmail });
-      if (adminUser?.role !== 'admin') {
-        return res.status(403).send({ message: 'Forbidden' });
-      }
+      const email = req.tokenEmail;
 
       try {
-        const dailyRevenue = await bookingCollection.aggregate([
-          {
-            $match: {
-              status: 'paid',
-              paidAt: { $exists: true }
-            }
-          },
-          {
-            $group: {
-              _id: { $dateToString: { format: "%Y-%m-%d", date: "$paidAt" } },
-              totalRevenue: { $sum: "$paidAmountUSD" }
-            }
-          },
-          { $sort: { _id: -1 } }, // newest first
-          { $limit: 30 } // last 30 days
-        ]).toArray();
 
-        res.send(dailyRevenue);
-      } catch (err) {
-        console.error("Daily revenue error:", err);
-        res.status(500).send({ message: 'Error fetching daily revenue' });
+        const alreadyApplied = await decoratorCollection.findOne({ email });
+
+        if (alreadyApplied) {
+          return res.status(409).send({
+            success: false,
+            message: 'You have already submitted an application. Please wait for review.'
+          });
+        }
+
+        const application = {
+          name: fullName || 'Unknown',
+          email,
+          phone: phone || null,
+          experience: Number(experience) || 0,
+          portfolio: portfolio || null,
+          region: region || null,
+          district: district || null,
+          specialization: specialization || null,
+          bio: bio || null,
+          status: 'pending',
+          appliedAt: new Date(),
+          userId: req.user?.uid || null
+        };
+
+        const result = await decoratorCollection.insertOne(application);
+
+        console.log(`New decorator application from ${email}:`, result.insertedId);
+
+        res.status(201).send({
+          success: true,
+          message: 'Application submitted successfully!',
+          insertedId: result.insertedId
+        });
+      } catch (error) {
+        console.error('Become decorator error:', error);
+        res.status(500).send({
+          success: false,
+          message: 'Failed to submit application. Please try again later.'
+        });
       }
     });
 
-    // Monthly Revenue (last 12 months)
-    app.get('/revenue/monthly', verifyJWT, async (req, res) => {
-      const adminUser = await usersCollection.findOne({ email: req.tokenEmail });
-      if (adminUser?.role !== 'admin') {
-        return res.status(403).send({ message: 'Forbidden' });
+    app.get('/decorators', async (req, res) => {
+      const query = {};
+      if (req.query.region) {
+        query.status = req.query.status;
       }
-
-      try {
-        const monthlyRevenue = await bookingCollection.aggregate([
-          {
-            $match: {
-              status: 'paid',
-              paidAt: { $exists: true }
-            }
-          },
-          {
-            $group: {
-              _id: { $dateToString: { format: "%Y-%m", date: "$paidAt" } },
-              totalRevenue: { $sum: "$paidAmountUSD" }
-            }
-          },
-          { $sort: { _id: -1 } },
-          { $limit: 12 } // last 12 months
-        ]).toArray();
-
-        res.send(monthlyRevenue);
-      } catch (err) {
-        console.error("Monthly revenue error:", err);
-        res.status(500).send({ message: 'Error fetching monthly revenue' });
-      }
-    });
-
-    // Revenue by Service
-    app.get('/revenue/by-service', verifyJWT, async (req, res) => {
-      const adminUser = await usersCollection.findOne({ email: req.tokenEmail });
-      if (adminUser?.role !== 'admin') {
-        return res.status(403).send({ message: 'Forbidden' });
-      }
-
-      try {
-        const serviceRevenue = await bookingCollection.aggregate([
-          {
-            $match: {
-              status: 'paid',
-              serviceName: { $exists: true }
-            }
-          },
-          {
-            $group: {
-              _id: "$serviceName",
-              totalRevenue: { $sum: "$paidAmountUSD" }
-            }
-          },
-          { $sort: { totalRevenue: -1 } }, // highest first
-          { $limit: 10 } // top 10 services
-        ]).toArray();
-
-        res.send(serviceRevenue);
-      } catch (err) {
-        console.error("Service revenue error:", err);
-        res.status(500).send({ message: 'Error fetching service revenue' });
-      }
+      const cursor = decoratorCollection.find(query).sort({ appliedAt: -1 });
+      const decorators = await cursor.toArray();
+      res.send(decorators);
     });
 
 
-    app.get('/decorator-requests', verifyJWT, async (req, res) => {
-      console.log('───────────────────────────────');
-      console.log('[GET /decorator-requests] Requested by:', req.tokenEmail);
 
-      const requester = await usersCollection.findOne({ email: req.tokenEmail });
+    app.patch('/decorators/:id', verifyJWT, async (req, res) => {
+  try {
+    const admin = await usersCollection.findOne({ email: req.tokenEmail });
+    if (!admin || admin.role !== 'admin') {
+      return res.status(403).json({ message: 'Only admins can update decorator status' });
+    }
 
-      console.log('[GET /decorator-requests] User document found:',
-        requester ? 'YES' : 'NO',
-        requester ? `(role: ${requester.role})` : ''
-      );
+    const { status, email } = req.body;
+    const id = req.params.id;
 
-      if (!requester) {
-        console.log('[403] → User not found in users collection');
-        return res.status(403).send({ message: 'Forbidden' });
+    if (!status || !['approved', 'rejected'].includes(status)) {
+      return res.status(400).json({ message: 'Invalid or missing status' });
+    }
+
+    if (!email) {
+      return res.status(400).json({ message: 'Email is required in request body' });
+    }
+
+    let objectId;
+    try {
+      objectId = new ObjectId(id);
+    } catch (err) {
+      return res.status(400).json({ message: 'Invalid decorator ID format' });
+    }
+
+    // Decorator আপডেট
+    const updateDoc = {
+      $set: {
+        status: status,
       }
+    };
 
-      if (requester.role !== 'admin') {
-        console.log(`[403] → Role is "${requester.role}" → not admin`);
-        return res.status(403).send({ message: 'Forbidden' });
-      }
+    // Approved হলে workStatus 'available' করে দাও (এটাই মূল পরিবর্তন)
+    if (status === 'approved') {
+      updateDoc.$set.workStatus = 'available';
+    }
 
-      console.log('[admin check passed] Now querying decoratorRequests...');
+    const updateResult = await decoratorCollection.updateOne(
+      { _id: objectId },
+      updateDoc
+    );
 
-      const requests = await decoratorRequestsCollection
-        .find({ status: 'pending' })
-        .sort({ appliedAt: -1 })
-        .toArray();
+    if (updateResult.matchedCount === 0) {
+      return res.status(404).json({ message: 'Decorator request not found' });
+    }
 
-      console.log('[GET /decorator-requests] Found pending requests:', requests.length);
-      if (requests.length > 0) {
-        console.log('First request sample:', JSON.stringify(requests[0], null, 2).slice(0, 400) + '...');
-      } else {
-        console.log('No pending requests found');
-      }
-
-      res.send(requests);
-    });
-
-    app.patch('/approve-decorator/:email', verifyJWT, async (req, res) => {
-      console.log('[PATCH /approve-decorator] Requested by:', req.tokenEmail);
-      console.log('[PATCH /approve-decorator] Target email:', req.params.email);
-      const adminUser = await usersCollection.findOne({
-        email: req.tokenEmail,
-      });
-
-      if (adminUser?.role !== 'admin') {
-        return res.status(403).send({ message: 'Forbidden' });
-      }
-
-      const email = req.params.email;
-
-      // 1️⃣ find user
-      const user = await usersCollection.findOne({ email });
-      if (!user) {
-        return res.status(404).send({ message: 'User not found' });
-      }
-
-      // 2️⃣ insert into decorator collection
-      await decoratorCollection.insertOne({
-        name: user.name || user.displayName || 'Decorator',
-        email: user.email,
-        createdAt: new Date(),
-        active: true,
-      });
-
-      // 3️⃣ update user role
-      await usersCollection.updateOne(
-        { email },
+    // Approved হলে user role আপডেট
+    let userUpdateResult = null;
+    if (status === 'approved') {
+      userUpdateResult = await usersCollection.updateOne(
+        { email: email },
         { $set: { role: 'decorator' } }
       );
+    }
 
-      // 4️⃣ update request status
-      await decoratorRequestsCollection.updateOne(
-        { email },
-        { $set: { status: 'approved' } }
-      );
-
-      res.send({ success: true });
+    return res.json({
+      success: true,
+      modifiedCount: updateResult.modifiedCount,
+      userUpdated: status === 'approved' ? (userUpdateResult?.modifiedCount > 0) : false,
+      message: `Decorator status updated to ${status}`
     });
 
+  } catch (error) {
+    console.error('PATCH /decorators/:id error:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Server error while updating decorator status',
+      error: error.message
+    });
+  }
+});
 
-    app.delete('/reject-decorator/:id', verifyJWT, async (req, res) => {
-      const adminUser = await usersCollection.findOne({
-        email: req.tokenEmail,
-      });
 
-      if (adminUser?.role !== 'admin') {
-        return res.status(403).send({ message: 'Forbidden' });
+
+    app.delete('/decorators/:id', verifyJWT, async (req, res) => {
+      try {
+        // Admin চেক (অন্যথায় যে কেউ delete করতে পারবে)
+        const admin = await usersCollection.findOne({ email: req.tokenEmail });
+        if (!admin || admin.role !== 'admin') {
+          return res.status(403).json({ message: 'Only admins can delete decorator requests' });
+        }
+
+        const id = req.params.id;
+
+        let objectId;
+        try {
+          objectId = new ObjectId(id);
+        } catch (err) {
+          return res.status(400).json({ message: 'Invalid ID format' });
+        }
+
+        const deleteResult = await decoratorCollection.deleteOne({ _id: objectId });
+
+        if (deleteResult.deletedCount === 0) {
+          return res.status(404).json({ message: 'Decorator request not found' });
+        }
+
+        return res.json({
+          success: true,
+          message: 'Decorator request deleted successfully',
+          deletedCount: deleteResult.deletedCount
+        });
+
+      } catch (error) {
+        console.error('DELETE /decorators/:id error:', error);
+        return res.status(500).json({
+          success: false,
+          message: 'Server error while deleting decorator request',
+          error: error.message
+        });
       }
-
-      const id = req.params.id;
-
-      await decoratorRequestsCollection.deleteOne({
-        _id: new ObjectId(id),
-      });
-
-      res.send({ success: true });
     });
 
 
@@ -477,6 +453,7 @@ app.get('/admin/payments', verifyJWT, async (req, res) => {
         status: 'unpaid',
         stripeSessionId: null,
         transactionId: null,
+        workStatus: 'pending',
 
         // 🔹 timestamps
         createdAt: new Date(),
@@ -492,7 +469,6 @@ app.get('/admin/payments', verifyJWT, async (req, res) => {
     });
 
 
-    // backend/server.js এর মধ্যে run() ফাংশনে যোগ করো
 
     // backend/server.js এর মধ্যে run() ফাংশনে যোগ করো
 
@@ -510,7 +486,7 @@ app.get('/admin/payments', verifyJWT, async (req, res) => {
 
       try {
         const existing = await bookingCollection.findOne({
-          serviceId: serviceId,              // ← string হিসেবে চেক
+          serviceId: serviceId,
           customerEmail: email
         });
 
@@ -528,75 +504,76 @@ app.get('/admin/payments', verifyJWT, async (req, res) => {
 
 
 
-app.post('/payment-success', async (req, res) => {
-  const { sessionId } = req.body;
+    app.post('/payment-success', async (req, res) => {
+      const { sessionId } = req.body;
 
-  if (!sessionId) {
-    return res.status(400).send({ message: 'Session ID required' });
-  }
+      if (!sessionId) {
+        return res.status(400).send({ message: 'Session ID required' });
+      }
 
-  try {
-    const session = await stripe.checkout.sessions.retrieve(sessionId);
+      try {
+        const session = await stripe.checkout.sessions.retrieve(sessionId);
 
-    if (session.payment_status !== 'paid') {
-      return res.status(400).send({ message: 'Payment not completed' });
-    }
-
-    // আগে থেকে unpaid booking খুঁজে দেখো
-    const unpaidBooking = await bookingCollection.findOne({
-      serviceId: session.metadata.serviceId,
-      customerEmail: session.metadata.customerEmail,
-      status: 'unpaid'
-    });
-
-    if (unpaidBooking) {
-      // ১. booking আপডেট করো
-      await bookingCollection.updateOne(
-        { _id: unpaidBooking._id },
-        {
-          $set: {
-            status: 'paid',
-            paidAt: new Date(),
-            paidAmountUSD: session.amount_total / 100,
-            stripeSessionId: session.id,
-            transactionId: session.payment_intent || null
-          }
+        if (session.payment_status !== 'paid') {
+          return res.status(400).send({ message: 'Payment not completed' });
         }
-      );
 
-      console.log('Booking updated to paid:', unpaidBooking._id);
 
-      // ২. paymentCollection-এ নতুন ডকুমেন্ট ইনসার্ট করো
-      const paymentRecord = {
-        bookingId: unpaidBooking._id,
-        stripeSessionId: session.id,
-        transactionId: session.payment_intent || null,
-        customerEmail: session.metadata.customerEmail,
-        customerName: session.metadata.customerName || 'Guest',
-        serviceId: session.metadata.serviceId,
-        serviceName: unpaidBooking.serviceName || 'Unknown',
-        serviceImage: unpaidBooking.serviceImage || '',
-        amountUSD: session.amount_total / 100,
-        originalPriceBDT: Number(session.metadata.originalPriceBDT) || 0,
-        paymentStatus: 'paid',
-        paidAt: new Date(),
-        createdAt: new Date(),
-        metadata: session.metadata // extra info যদি লাগে
-      };
+        const unpaidBooking = await bookingCollection.findOne({
+          serviceId: session.metadata.serviceId,
+          customerEmail: session.metadata.customerEmail,
+          status: 'unpaid'
+        });
 
-      const paymentResult = await paymentCollection.insertOne(paymentRecord);
-      console.log('Payment record saved in paymentCollection:', paymentResult.insertedId);
+        if (unpaidBooking) {
+          // ১. booking আপডেট করো
+          await bookingCollection.updateOne(
+            { _id: unpaidBooking._id },
+            {
+              $set: {
+                status: 'paid',
+                paidAt: new Date(),
+                paidAmountUSD: session.amount_total / 100,
+                stripeSessionId: session.id,
+                transactionId: session.payment_intent || null,
+                workStatus: 'pending'
+              }
+            }
+          );
 
-      return res.send({ success: true, message: 'Booking confirmed & payment recorded' });
-    }
+          console.log('Booking updated to paid:', unpaidBooking._id);
 
-    return res.status(404).send({ message: 'No unpaid booking found for this payment' });
+          // ২. paymentCollection-এ নতুন ডকুমেন্ট ইনসার্ট করো
+          const paymentRecord = {
+            bookingId: unpaidBooking._id,
+            stripeSessionId: session.id,
+            transactionId: session.payment_intent || null,
+            customerEmail: session.metadata.customerEmail,
+            customerName: session.metadata.customerName || 'Guest',
+            serviceId: session.metadata.serviceId,
+            serviceName: unpaidBooking.serviceName || 'Unknown',
+            serviceImage: unpaidBooking.serviceImage || '',
+            amountUSD: session.amount_total / 100,
+            originalPriceBDT: Number(session.metadata.originalPriceBDT) || 0,
+            paymentStatus: 'paid',
+            paidAt: new Date(),
+            createdAt: new Date(),
+            metadata: session.metadata // extra info যদি লাগে
+          };
 
-  } catch (error) {
-    console.error('Payment success error:', error);
-    res.status(500).send({ message: 'Failed to confirm booking' });
-  }
-});
+          const paymentResult = await paymentCollection.insertOne(paymentRecord);
+          console.log('Payment record saved in paymentCollection:', paymentResult.insertedId);
+
+          return res.send({ success: true, message: 'Booking confirmed & payment recorded' });
+        }
+
+        return res.status(404).send({ message: 'No unpaid booking found for this payment' });
+
+      } catch (error) {
+        console.error('Payment success error:', error);
+        res.status(500).send({ message: 'Failed to confirm booking' });
+      }
+    });
 
 
     app.post('/create-stripe-session', verifyJWT, async (req, res) => {
@@ -629,7 +606,7 @@ app.post('/payment-success', async (req, res) => {
           cancel_url: `${baseUrl}/services`,
           metadata: {
             serviceId: bookingInfo.serviceId,
-            customerEmail: req.tokenEmail, // verifyJWT থেকে নিরাপদে নেয়া
+            customerEmail: req.tokenEmail,
             customerName: bookingInfo.customer?.name || 'Guest',
             bookingDate: bookingInfo.bookingDate,
             location: bookingInfo.location,
@@ -649,6 +626,115 @@ app.post('/payment-success', async (req, res) => {
     });
 
 
+    // ১. Assign decorator to booking
+    app.patch('/bookings/:id/assign-decorator', verifyJWT, verifyAdmin, async (req, res) => {
+  try {
+    const bookingId = req.params.id;
+    const assignInfo = req.body;
+
+    if (!ObjectId.isValid(bookingId)) {
+      return res.status(400).json({ message: 'Invalid booking ID' });
+    }
+
+    const booking = await bookingCollection.findOne({ _id: new ObjectId(bookingId) });
+
+    if (!booking) {
+      return res.status(404).json({ message: 'Booking not found' });
+    }
+
+    if (booking.decoratorId) {
+      return res.status(400).json({ message: 'Decorator already assigned' });
+    }
+
+    // চেক করো decorator available আছে কি না (অতিরিক্ত নিরাপত্তা)
+    const decorator = await decoratorCollection.findOne({ _id: new ObjectId(assignInfo.decoratorId) });
+    if (!decorator || decorator.workStatus !== 'available') {
+      return res.status(400).json({ message: 'Decorator is not available or not found' });
+    }
+
+    // Booking update
+    const updateResult = await bookingCollection.updateOne(
+      { _id: new ObjectId(bookingId) },
+      {
+        $set: {
+          decoratorId: assignInfo.decoratorId,
+          decoratorEmail: assignInfo.decoratorEmail,
+          decoratorName: assignInfo.decoratorName,
+          assignedAt: assignInfo.assignedAt,
+          workStatus: 'assigned'
+        }
+      }
+    );
+
+    // Decorator busy করো (এটাই মূল ফিক্স!)
+    await decoratorCollection.updateOne(
+      { _id: new ObjectId(assignInfo.decoratorId) },
+      { $set: { workStatus: 'busy' } }
+    );
+
+    if (updateResult.modifiedCount === 0) {
+      return res.status(400).json({ message: 'No changes made' });
+    }
+
+    res.json({ success: true, modifiedCount: updateResult.modifiedCount });
+  } catch (error) {
+    console.error('Assign decorator error:', error);
+    res.status(500).json({ message: 'Server error while assigning decorator' });
+  }
+});
+
+    // Decorator-এর workStatus update route
+app.patch('/decorators/:id/work-status', verifyJWT, verifyAdmin, async (req, res) => {
+  try {
+    const decoratorId = req.params.id;
+    const { workStatus } = req.body;
+
+    if (!ObjectId.isValid(decoratorId)) {
+      return res.status(400).json({ message: 'Invalid decorator ID' });
+    }
+
+    const updateResult = await decoratorCollection.updateOne(
+      { _id: new ObjectId(decoratorId) },
+      { $set: { workStatus } }
+    );
+
+    if (updateResult.modifiedCount === 0) {
+      return res.status(404).json({ message: 'Decorator not found or no changes' });
+    }
+
+    res.json({ success: true, message: `Work status updated to ${workStatus}` });
+  } catch (error) {
+    console.error('Update decorator work status error:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+    // ২. Decorator-এর workStatus update (optional কিন্তু তোমার কোডে আছে)
+    app.patch('/decorators/:id/work-status', verifyJWT, verifyAdmin, async (req, res) => {
+      try {
+        const decoratorId = req.params.id;
+        const { workStatus } = req.body;
+
+        if (!ObjectId.isValid(decoratorId)) {
+          return res.status(400).json({ message: 'Invalid decorator ID' });
+        }
+
+        const updateResult = await decoratorCollection.updateOne(
+          { _id: new ObjectId(decoratorId) },
+          { $set: { workStatus } }
+        );
+
+        if (updateResult.modifiedCount === 0) {
+          return res.status(400).json({ message: 'No changes made or decorator not found' });
+        }
+
+        res.json({ success: true, message: `Decorator work status updated to ${workStatus}` });
+      } catch (error) {
+        console.error('Update decorator work status error:', error);
+        res.status(500).json({ message: 'Server error' });
+      }
+    });
+
 
     // Public route for home page services
     app.get('/services', async (req, res) => {
@@ -661,19 +747,7 @@ app.post('/payment-success', async (req, res) => {
     });
 
 
-    app.get('/top-decorators', async (req, res) => {
-      try {
-        const decorators = await usersCollection
-          .find({ role: 'decorator' })
-          .limit(4)
-          .toArray();
 
-        res.send(decorators);
-      } catch (error) {
-        console.error('Error fetching top decorators:', error);
-        res.status(500).send({ message: 'Error fetching decorators' });
-      }
-    });
 
 
 
@@ -698,60 +772,60 @@ app.post('/payment-success', async (req, res) => {
     });
 
     // User can update their own unpaid booking
-// User can update their own unpaid booking
-app.patch('/bookings/:id', verifyJWT, async (req, res) => {
-  const bookingId = req.params.id.trim(); // extra space বাদ দাও
-  const email = req.tokenEmail;
-  const updateData = req.body;
+    // User can update their own unpaid booking
+    app.patch('/bookings/:id', verifyJWT, async (req, res) => {
+      const bookingId = req.params.id.trim(); // extra space বাদ দাও
+      const email = req.tokenEmail;
+      const updateData = req.body;
 
-  console.log("PATCH /bookings/:id - Received ID:", bookingId);
-  console.log("PATCH /bookings/:id - Update data:", updateData);
-  console.log("PATCH request by:", email);
-  console.log("Trying to edit booking ID:", bookingId);
+      console.log("PATCH /bookings/:id - Received ID:", bookingId);
+      console.log("PATCH /bookings/:id - Update data:", updateData);
+      console.log("PATCH request by:", email);
+      console.log("Trying to edit booking ID:", bookingId);
 
-  if (!ObjectId.isValid(bookingId)) {
-    console.log("Invalid ID format:", bookingId);
-    return res.status(400).send({ message: 'Invalid booking ID format' });
-  }
+      if (!ObjectId.isValid(bookingId)) {
+        console.log("Invalid ID format:", bookingId);
+        return res.status(400).send({ message: 'Invalid booking ID format' });
+      }
 
-  const objectId = new ObjectId(bookingId);
+      const objectId = new ObjectId(bookingId);
 
-  try {
-    // ১. booking টা আছে কি না + নিজের কি না চেক করো
-    const booking = await bookingCollection.findOne({
-      _id: objectId,
-      customerEmail: email
+      try {
+        // ১. booking টা আছে কি না + নিজের কি না চেক করো
+        const booking = await bookingCollection.findOne({
+          _id: objectId,
+          customerEmail: email
+        });
+
+        if (!booking) {
+          console.log("Booking not found or email mismatch. Found email:", booking?.customerEmail);
+          return res.status(404).send({ message: 'Booking not found or not yours' });
+        }
+
+        // ২. paid booking edit ব্লক (optional — চাইলে বাদ দিতে পারো)
+        if (booking.status === 'paid') {
+          console.log("Paid booking edit blocked:", bookingId)
+          return res.status(403).send({ message: 'Paid bookings cannot be edited' });
+        }
+
+        // ৩. আপডেট করো
+        const result = await bookingCollection.updateOne(
+          { _id: objectId },
+          { $set: updateData }
+        );
+
+        console.log("Update result:", result);
+
+        if (result.modifiedCount > 0) {
+          res.send({ success: true, message: 'Booking updated successfully' });
+        } else {
+          res.status(400).send({ message: 'No changes made or update failed' });
+        }
+      } catch (err) {
+        console.error("PATCH /bookings/:id error:", err);
+        res.status(500).send({ message: 'Failed to update booking' });
+      }
     });
-
-    if (!booking) {
-      console.log("Booking not found or email mismatch. Found email:", booking?.customerEmail);
-      return res.status(404).send({ message: 'Booking not found or not yours' });
-    }
-
-    // ২. paid booking edit ব্লক (optional — চাইলে বাদ দিতে পারো)
-    if (booking.status === 'paid') {
-      console.log("Paid booking edit blocked:", bookingId)
-      return res.status(403).send({ message: 'Paid bookings cannot be edited' });
-    }
-
-    // ৩. আপডেট করো
-    const result = await bookingCollection.updateOne(
-      { _id: objectId },
-      { $set: updateData }
-    );
-
-    console.log("Update result:", result);
-
-    if (result.modifiedCount > 0) {
-      res.send({ success: true, message: 'Booking updated successfully' });
-    } else {
-      res.status(400).send({ message: 'No changes made or update failed' });
-    }
-  } catch (err) {
-    console.error("PATCH /bookings/:id error:", err);
-    res.status(500).send({ message: 'Failed to update booking' });
-  }
-});
 
     app.delete('/bookings/:id', verifyJWT, async (req, res) => {
       const bookingId = req.params.id;

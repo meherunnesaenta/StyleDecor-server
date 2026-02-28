@@ -15,6 +15,7 @@ const decoded = Buffer.from(process.env.FB_Service_Key, 'base64').toString(
   'utf-8'
 )
 const serviceAccount = JSON.parse(decoded)
+
 admin.initializeApp({
   credential: admin.credential.cert(serviceAccount),
 })
@@ -22,13 +23,15 @@ admin.initializeApp({
 
 // middleware
 app.use(express.json());
-const corsOptions = {
-  origin: process.env.CLIENT_URL || 'http://localhost:5173',
-  credentials: true,
-  optionsSuccessStatus: 200
-};
 
-app.use(cors(corsOptions));
+
+const allowedOrigins = [
+  "http://localhost:5173"
+];
+
+app.use(cors());
+
+
 
 
 const verifyJWT = async (req, res, next) => {
@@ -114,9 +117,16 @@ async function run() {
       const result = await serviceCollection.insertOne(service);
       res.send(result);
     })
+     // Public route for home page services
+    app.get('/services', async (req, res) => {
+    const result = await serviceCollection.find().toArray();
+    res.send(result);
+    });
 
-    app.get('/service', async (req, res) => {
-      const result = await serviceCollection.find().toArray();
+
+
+    app.get('/servicesort', async (req, res) => {
+      const result = await serviceCollection.find().sort({ created_at: -1 }).limit(6).toArray();
       res.send(result);
     })
 
@@ -271,7 +281,7 @@ async function run() {
 
     app.post('/decorator/admin-create', verifyJWT, verifyAdmin, async (req, res) => {
       try {
-        const data = req.body || {}; // body undefined হলে empty object
+        const data = req.body || {};
 
         if (!data.email) {
           return res.status(400).json({
@@ -341,6 +351,7 @@ async function run() {
 
     app.get('/users', async (req, res) => {
       const searchText = req.query.searchText;
+
       const query = {};
 
       if (searchText) {
@@ -355,6 +366,17 @@ async function run() {
       const cursor = usersCollection.find(query).sort({ createdAt: -1 }).limit(5);
       const result = await cursor.toArray();
       res.send(result);
+    })
+
+    app.get('/users/decorator',async(req,res)=>{
+      const {role} =req.query;
+      const query={};
+      if(role){
+        query.role =role;
+      }
+      const result =await usersCollection.find(query).sort({createdAt:-1}).toArray();
+      res.send(result);
+
     })
 
     app.get('/users/:email/role', async (req, res) => {
@@ -512,38 +534,54 @@ async function run() {
 
     app.patch('/decorators/:id', verifyJWT, async (req, res) => {
       try {
+        // ✅ Admin check
         const admin = await usersCollection.findOne({ email: req.tokenEmail });
         if (!admin || admin.role !== 'admin') {
-          return res.status(403).json({ message: 'Only admins can update decorator status' });
+          return res.status(403).json({
+            success: false,
+            message: 'Only admins can update decorator status'
+          });
         }
 
-        const { status, email } = req.body;
-        const id = req.params.id;
+        const { status } = req.body;
+        const { id } = req.params;
 
         if (!status || !['approved', 'rejected'].includes(status)) {
-          return res.status(400).json({ message: 'Invalid or missing status' });
+          return res.status(400).json({
+            success: false,
+            message: 'Invalid or missing status'
+          });
         }
 
-        if (!email) {
-          return res.status(400).json({ message: 'Email is required in request body' });
-        }
-
+        // ✅ Validate ObjectId
         let objectId;
         try {
           objectId = new ObjectId(id);
-        } catch (err) {
-          return res.status(400).json({ message: 'Invalid decorator ID format' });
+        } catch {
+          return res.status(400).json({
+            success: false,
+            message: 'Invalid decorator ID'
+          });
         }
 
-        // Decorator 
+        // ✅ STEP 1: find decorator (source of truth)
+        const decorator = await decoratorCollection.findOne({ _id: objectId });
+        if (!decorator) {
+          return res.status(404).json({
+            success: false,
+            message: 'Decorator request not found'
+          });
+        }
+
+        // ✅ STEP 2: update decorator status
         const updateDoc = {
-          $set: {
-            status: status,
-          }
+          $set: { status }
         };
 
         if (status === 'approved') {
           updateDoc.$set.workStatus = 'available';
+        } else {
+          updateDoc.$unset = { workStatus: '' };
         }
 
         const updateResult = await decoratorCollection.updateOne(
@@ -551,24 +589,24 @@ async function run() {
           updateDoc
         );
 
-        if (updateResult.matchedCount === 0) {
-          return res.status(404).json({ message: 'Decorator request not found' });
-        }
-
-        // Approved হলে user role আপডেট
-        let userUpdateResult = null;
+        // ✅ STEP 3: sync user role
         if (status === 'approved') {
-          userUpdateResult = await usersCollection.updateOne(
-            { email: email },
+          await usersCollection.updateOne(
+            { email: decorator.email },
             { $set: { role: 'decorator' } }
+          );
+        } else {
+          await usersCollection.updateOne(
+            { email: decorator.email },
+            { $set: { role: 'user' } }
           );
         }
 
         return res.json({
           success: true,
-          modifiedCount: updateResult.modifiedCount,
-          userUpdated: status === 'approved' ? (userUpdateResult?.modifiedCount > 0) : false,
-          message: `Decorator status updated to ${status}`
+          decoratorId: id,
+          newStatus: status,
+          message: `Decorator ${status} successfully`
         });
 
       } catch (error) {
@@ -583,33 +621,60 @@ async function run() {
 
 
 
+
     app.delete('/decorators/:id', verifyJWT, async (req, res) => {
       try {
-        // Admin চেক (অন্যথায় যে কেউ delete করতে পারবে)
         const admin = await usersCollection.findOne({ email: req.tokenEmail });
         if (!admin || admin.role !== 'admin') {
-          return res.status(403).json({ message: 'Only admins can delete decorator requests' });
+          return res.status(403).json({
+            success: false,
+            message: 'Only admins can delete decorator requests'
+          });
         }
 
-        const id = req.params.id;
+        const { id } = req.params;
+
 
         let objectId;
         try {
           objectId = new ObjectId(id);
-        } catch (err) {
-          return res.status(400).json({ message: 'Invalid ID format' });
+        } catch {
+          return res.status(400).json({
+            success: false,
+            message: 'Invalid decorator ID'
+          });
         }
 
+        // ✅ STEP 1: Find decorator FIRST
+        const decorator = await decoratorCollection.findOne({ _id: objectId });
+        if (!decorator) {
+          return res.status(404).json({
+            success: false,
+            message: 'Decorator request not found'
+          });
+        }
+
+        // ✅ STEP 2: Delete decorator request
         const deleteResult = await decoratorCollection.deleteOne({ _id: objectId });
 
         if (deleteResult.deletedCount === 0) {
-          return res.status(404).json({ message: 'Decorator request not found' });
+          return res.status(500).json({
+            success: false,
+            message: 'Failed to delete decorator request'
+          });
         }
 
+        // ✅ STEP 3: Reset user role
+        await usersCollection.updateOne(
+          { email: decorator.email },
+          { $set: { role: 'user' } }
+        );
+
+        // ✅ Final response
         return res.json({
           success: true,
-          message: 'Decorator request deleted successfully',
-          deletedCount: deleteResult.deletedCount
+          message: 'Decorator request deleted and user role reset to user',
+          deletedDecoratorId: id
         });
 
       } catch (error) {
@@ -621,6 +686,8 @@ async function run() {
         });
       }
     });
+
+
 
 
     app.post('/decorators/delete-by-email', verifyJWT, verifyAdmin, async (req, res) => {
@@ -637,6 +704,11 @@ async function run() {
           return res.status(404).json({ message: 'No decorator found with this email' });
         }
 
+        await usersCollection.updateOne(
+          { email },
+          { $set: { role: 'user' } }
+        );
+
         res.json({
           success: true,
           message: 'Decorator deleted successfully',
@@ -647,6 +719,8 @@ async function run() {
         res.status(500).json({ message: 'Server error' });
       }
     });
+
+
 
 
 
@@ -695,9 +769,6 @@ async function run() {
       });
     });
 
-
-
-    // backend/server.js এর মধ্যে run() ফাংশনে যোগ করো
 
     app.get('/check-booking', verifyJWT, async (req, res) => {
       const { serviceId } = req.query;
@@ -753,7 +824,7 @@ async function run() {
         });
 
         if (unpaidBooking) {
-          // ১. booking আপডেট করো
+          // ১. booking 
           await bookingCollection.updateOne(
             { _id: unpaidBooking._id },
             {
@@ -807,7 +878,12 @@ async function run() {
 
     app.post('/create-stripe-session', verifyJWT, async (req, res) => {
       const bookingInfo = req.body;
-      const baseUrl = process.env.CLIENT_URL || 'http://localhost:5173';
+      const baseUrl = process.env.CLIENT_URL;
+
+      if (!baseUrl) {
+        throw new Error('CLIENT_URL is not defined');
+      }
+
 
       console.log('[create-stripe-session] Requested by:', req.tokenEmail);
       console.log('[create-stripe-session] Booking info:', bookingInfo);
@@ -826,13 +902,13 @@ async function run() {
                 name: bookingInfo.serviceName,
                 images: bookingInfo.serviceImage ? [bookingInfo.serviceImage] : [],
               },
-              unit_amount: Math.round(bookingInfo.price * 100), // cents-এ কনভার্ট
+              unit_amount: Math.round(bookingInfo.price * 100),
             },
             quantity: 1,
           }],
           mode: 'payment',
-          success_url: `${baseUrl}/booking-success?session_id={CHECKOUT_SESSION_ID}`,
-          cancel_url: `${baseUrl}/services`,
+          success_url: `${process.env.CLIENT_URL}/booking-success?session_id={CHECKOUT_SESSION_ID}`,
+          cancel_url: `${process.env.CLIENT_URL}/services`,
           metadata: {
             serviceId: bookingInfo.serviceId,
             customerEmail: req.tokenEmail,
@@ -875,13 +951,11 @@ async function run() {
           return res.status(400).json({ message: 'Decorator already assigned' });
         }
 
-        // চেক করো decorator available আছে কি না (অতিরিক্ত নিরাপত্তা)
         const decorator = await decoratorCollection.findOne({ _id: new ObjectId(assignInfo.decoratorId) });
         if (!decorator || decorator.workStatus !== 'available') {
           return res.status(400).json({ message: 'Decorator is not available or not found' });
         }
 
-        // Booking update
         const updateResult = await bookingCollection.updateOne(
           { _id: new ObjectId(bookingId) },
           {
@@ -895,7 +969,8 @@ async function run() {
           }
         );
 
-        // Decorator busy করো (এটাই মূল ফিক্স!)
+        // Decorator busy 
+
         await decoratorCollection.updateOne(
           { _id: new ObjectId(assignInfo.decoratorId) },
           { $set: { workStatus: 'busy' } }
@@ -914,43 +989,6 @@ async function run() {
       }
     });
 
-    app.patch('/decorators/:id/work-status', verifyJWT, async (req, res) => {
-      try {
-        const decoratorId = req.params.id;
-        const { workStatus } = req.body;
-        const email = req.tokenEmail;
-
-        if (!ObjectId.isValid(decoratorId)) {
-          return res.status(400).json({ message: 'Invalid decorator ID' });
-        }
-
-        const decorator = await decoratorCollection.findOne({ _id: new ObjectId(decoratorId) });
-
-        if (!decorator) {
-          return res.status(404).json({ message: 'Decorator not found' });
-        }
-
-        // শুধু নিজের workStatus update করতে পারবে, অথবা admin
-        const isAdmin = await usersCollection.findOne({ email, role: 'admin' });
-        if (decorator.email !== email && !isAdmin) {
-          return res.status(403).json({ message: 'You can only update your own work status' });
-        }
-
-        const updateResult = await decoratorCollection.updateOne(
-          { _id: new ObjectId(decoratorId) },
-          { $set: { workStatus } }
-        );
-
-        if (updateResult.modifiedCount === 0) {
-          return res.status(400).json({ message: 'No changes made' });
-        }
-
-        res.json({ success: true, message: `Work status updated to ${workStatus}` });
-      } catch (error) {
-        console.error('Update decorator work status error:', error);
-        res.status(500).json({ message: 'Server error' });
-      }
-    });
 
 
     app.patch('/decorators/:id/work-status', verifyJWT, async (req, res) => {
@@ -1018,97 +1056,89 @@ async function run() {
       }
     });
 
-    // Public route for home page services
-    app.get('/services', async (req, res) => {
-      try {
-        const result = await serviceCollection.find({ isActive: true }).toArray();
-        res.send(result);
-      } catch (error) {
-        res.status(500).send({ message: 'Error fetching services' });
-      }
+
+
+
+    app.get('/work-status/starts', async (req, res) => {
+      const pipeline = [
+        {
+          $group: {
+            _id: '$workStatus',
+            count: { $sum: 1 }
+          }
+        }
+      ];
+      const result = await bookingCollection.aggregate(pipeline).toArray();
+      res.send(result);
     });
 
 
-app.get('/work-status/starts', async (req, res) => {
-  const pipeline = [
-    {
-      $group: {
-        _id: '$workStatus',
-        count: { $sum: 1 }
-      }
-    }
-  ];
-  const result = await bookingCollection.aggregate(pipeline).toArray();
-  res.send(result);
-});
 
+    app.get('/decorator/work-per-day', verifyJWT, async (req, res) => {
+      try {
+        const decoratorEmail = req.tokenEmail
 
-
-app.get('/decorator/work-per-day', verifyJWT, async (req, res) => {
-  try {
-   const decoratorEmail = req.tokenEmail
-
-    if (!decoratorEmail) {
-      return res.status(400).send({ message: 'Decorator email is required' });
-    }
-
-    const pipeline = [
-      // 1️⃣ Match decorator + completed work
-      {
-        $match: {
-          decoratorEmail,
-          workStatus: 'completed',
-        },
-      },
-
-      // 2️⃣ Lookup tracking collection
-      {
-        $lookup: {
-          from: 'tracking',
-          localField: '_id',          // bookings._id
-          foreignField: 'trackingId', // tracking.trackingId
-          as: 'trackingInfo',
-        },
-      },
-
-      // 3️⃣ Match tracking status inside array
-      {
-        $match: {
-          'trackingInfo': {
-            $elemMatch: { statusMessage: 'Project Completed & Cashout Requested' }
-          }
+        if (!decoratorEmail) {
+          return res.status(400).send({ message: 'Decorator email is required' });
         }
-      },
 
-      // 4️⃣ Add completedDate (YYYY-MM-DD)
-      {
-        $addFields: {
-          completedDate: { $dateToString: { format: '%Y-%m-%d', date: '$assignedAt' } },
-        },
-      },
+        const pipeline = [
+          // 1️⃣ Match decorator + completed work
+          {
+            $match: {
+              decoratorEmail,
+              workStatus: 'completed',
+            },
+          },
 
-      // 5️⃣ Group by date
-      {
-        $group: {
-          _id: '$completedDate',
-          count: { $sum: 1 },
-        },
-      },
+          // 2️⃣ Lookup tracking collection
+          {
+            $lookup: {
+              from: 'tracking',
+              localField: '_id',          // bookings._id
+              foreignField: 'trackingId', // tracking.trackingId
+              as: 'trackingInfo',
+            },
+          },
 
-      // 6️⃣ Sort by date
-      {
-        $sort: { _id: 1 },
-      },
-    ];
+          // 3️⃣ Match tracking status inside array
+          {
+            $match: {
+              'trackingInfo': {
+                $elemMatch: { status: 'Project Completed & Cashout Requested' }
+              }
+            }
+          },
 
-    const result = await bookingCollection.aggregate(pipeline).toArray();
-    res.send(result);
+          // 4️⃣ Add completedDate (YYYY-MM-DD)
+          {
+            $addFields: {
+              completedDate: { $dateToString: { format: '%Y-%m-%d', date: '$assignedAt' } },
+            },
+          },
 
-  } catch (error) {
-    console.error('work-per-day error:', error);
-    res.status(500).send({ message: 'Server error' });
-  }
-});
+          // 5️⃣ Group by date
+          {
+            $group: {
+              _id: '$completedDate',
+              count: { $sum: 1 },
+            },
+          },
+
+          // 6️⃣ Sort by date
+          {
+            $sort: { _id: 1 },
+          },
+        ];
+
+        const result = await bookingCollection.aggregate(pipeline).toArray();
+        res.send(result);
+
+      } catch (error) {
+        console.error('work-per-day error:', error);
+        res.status(500).send({ message: 'Server error' });
+      }
+    });
 
 
 
@@ -1129,155 +1159,90 @@ app.get('/decorator/work-per-day', verifyJWT, async (req, res) => {
         res.status(500).send({ message: 'Failed to load bookings' });
       }
     });
-    app.get('/bookings/decorator', verifyJWT,verifyDecorator, async (req, res) => {
-      try {
-        const { decoratorEmail, workStatus } = req.query;
+app.get('/bookings/decorator', verifyJWT, verifyDecorator, async (req, res) => {
+  const { decoratorEmail, workStatus } = req.query;
 
-        if (decoratorEmail !== req.tokenEmail) {
-          return res.status(403).json({ message: 'You can only view your own assigned bookings' });
-        }
-
-        const query = { decoratorEmail };
-
-        if (workStatus) {
-          const statuses = workStatus.split(','); 
-          query.workStatus = { $in: statuses };
-        }
-
-        const cursor = bookingCollection.find(query).sort({ createdAt: -1 });
-        const result = await cursor.toArray();
-
-
-        res.send(result);
-      } catch (error) {
-        console.error('Error fetching decorator bookings:', error);
-
-        res.status(500).json({ message: 'Server error' });
-      }
-      if (updateResult.modifiedCount > 0) {
-        const trackingId = bookingId.toString();
-        const statusMessage = `Work Status Updated to ${workStatus}`;
-        await logTracking(trackingId, statusMessage, {
-          updatedBy: email,
-          previousStatus: booking.workStatus
-        });
-
-        res.json({ success: true, modifiedCount: updateResult.modifiedCount });
-      }
-    });
-
-
-    app.patch('/bookings/:id', verifyJWT, async (req, res) => {
-      const bookingId = req.params.id.trim();
-      const email = req.tokenEmail;
-      const updateData = req.body;
-
-
-
-      if (!ObjectId.isValid(bookingId)) {
-        console.log("Invalid ID format:", bookingId);
-        return res.status(400).send({ message: 'Invalid booking ID format' });
-      }
-
-      const objectId = new ObjectId(bookingId);
-
-      try {
-        const booking = await bookingCollection.findOne({
-          _id: objectId,
-          customerEmail: email
-        });
-
-        if (!booking) {
-          console.log("Booking not found or email mismatch. Found email:", booking?.customerEmail);
-          return res.status(404).send({ message: 'Booking not found or not yours' });
-        }
-
-        // ২. paid booking edit ব্লক (optional — চাইলে বাদ দিতে পারো)
-        if (booking.status === 'paid') {
-          console.log("Paid booking edit blocked:", bookingId)
-          return res.status(403).send({ message: 'Paid bookings cannot be edited' });
-        }
-
-        // ৩. আপডেট করো
-        const result = await bookingCollection.updateOne(
-          { _id: objectId },
-          { $set: updateData }
-        );
-
-        console.log("Update result:", result);
-        const trackingId = bookingId.toString();
-        await logTracking(trackingId, `Decorator updated status to ${workStatus}`);
-        if (result.modifiedCount > 0) {
-          res.send({ success: true, message: 'Booking updated successfully' });
-        } else {
-          res.status(400).send({ message: 'No changes made or update failed' });
-        }
-      } catch (err) {
-        console.error("PATCH /bookings/:id error:", err);
-        res.status(500).send({ message: 'Failed to update booking' });
-      }
-    });
-
-
-
-    // Decorator নিজের assigned booking-এর workStatus update করতে পারবে
-app.patch('/bookings/:id/decorator-status', verifyJWT, async (req, res) => {
-  try {
-    const bookingId = req.params.id;
-    const { workStatus } = req.body;
-    const email = req.tokenEmail;
-
-    if (!ObjectId.isValid(bookingId)) {
-      return res.status(400).json({ message: 'Invalid booking ID' });
-    }
-
-    const booking = await bookingCollection.findOne({ _id: new ObjectId(bookingId) });
-
-    if (!booking) {
-      return res.status(404).json({ message: 'Booking not found' });
-    }
-
-    if (booking.decoratorEmail !== email) {
-      return res.status(403).json({ message: 'This booking is not assigned to you' });
-    }
-
-    const allowedStatuses = ['in-progress', 'materials-prepared', 'completed', 'rejected'];
-    if (!allowedStatuses.includes(workStatus)) {
-      return res.status(400).json({ message: 'Invalid status update' });
-    }
-
-    const updateResult = await bookingCollection.updateOne(
-      { _id: new ObjectId(bookingId) },
-      { $set: { workStatus } }
-    );
-
-    if (updateResult.modifiedCount > 0) {
-      // Tracking log যোগ করা হলো
-      const trackingId = bookingId.toString();
-      await logTracking(trackingId, `Work Status Updated to ${workStatus}`, {
-        updatedBy: email,
-        previousStatus: booking.workStatus || 'assigned'
-      });
-
-      // যদি completed বা rejected হয়, তাহলে decorator available করো
-      if (workStatus === 'completed' || workStatus === 'rejected') {
-        await decoratorCollection.updateOne(
-          { _id: new ObjectId(booking.decoratorId) },
-          { $set: { workStatus: 'available' } }
-        );
-      }
-
-      res.json({ success: true, modifiedCount: updateResult.modifiedCount });
-    } else {
-      res.status(400).json({ message: 'No changes made' });
-    }
-  } catch (error) {
-    console.error('Decorator status update error:', error);
-    res.status(500).json({ message: 'Server error' });
+  if (decoratorEmail !== req.tokenEmail) {
+    return res.status(403).send({ message: "Forbidden" });
   }
+
+  const query = { decoratorEmail };
+
+  if (workStatus) {
+    query.workStatus = { $in: workStatus.split(',') };
+  }
+
+  const result = await bookingCollection
+    .find(query)
+    .sort({ createdAt: -1 })
+    .toArray();
+
+  res.send(result);
 });
 
-// এই route-টা আগের মতোই রাখো, কিন্তু logTracking যোগ করো যদি দরকার হয়
+
+
+
+
+
+
+    app.patch('/bookings/:id/decorator-status', verifyJWT, async (req, res) => {
+      try {
+        const bookingId = req.params.id;
+        const { workStatus } = req.body;
+        const email = req.tokenEmail;
+
+        if (!ObjectId.isValid(bookingId)) {
+          return res.status(400).json({ message: 'Invalid booking ID' });
+        }
+
+        const booking = await bookingCollection.findOne({ _id: new ObjectId(bookingId) });
+
+        if (!booking) {
+          return res.status(404).json({ message: 'Booking not found' });
+        }
+
+        if (booking.decoratorEmail !== email) {
+          return res.status(403).json({ message: 'This booking is not assigned to you' });
+        }
+
+        const allowedStatuses = ['in-progress', 'materials-prepared', 'completed', 'rejected'];
+        if (!allowedStatuses.includes(workStatus)) {
+          return res.status(400).json({ message: 'Invalid status update' });
+        }
+
+        const updateResult = await bookingCollection.updateOne(
+          { _id: new ObjectId(bookingId) },
+          { $set: { workStatus } }
+        );
+
+        if (updateResult.modifiedCount > 0) {
+          // Tracking log যোগ করা হলো
+          const trackingId = bookingId.toString();
+          await logTracking(trackingId, `Work Status Updated to ${workStatus}`, {
+            updatedBy: email,
+            previousStatus: booking.workStatus || 'assigned'
+          });
+
+          // যদি completed বা rejected হয়, তাহলে decorator available করো
+          if (workStatus === 'completed' || workStatus === 'rejected') {
+            await decoratorCollection.updateOne(
+              { _id: new ObjectId(booking.decoratorId) },
+              { $set: { workStatus: 'available' } }
+            );
+          }
+
+          res.json({ success: true, modifiedCount: updateResult.modifiedCount });
+        } else {
+          res.status(400).json({ message: 'No changes made' });
+        }
+      } catch (error) {
+        console.error('Decorator status update error:', error);
+        res.status(500).json({ message: 'Server error' });
+      }
+    });
+
+
 app.patch('/bookings/:id', verifyJWT, async (req, res) => {
   const bookingId = req.params.id.trim();
   const email = req.tokenEmail;
@@ -1309,9 +1274,7 @@ app.patch('/bookings/:id', verifyJWT, async (req, res) => {
     );
 
     if (result.modifiedCount > 0) {
-      // Optional: যদি customer booking edit করে তাহলে log করতে পারো
-      const trackingId = bookingId.toString();
-      await logTracking(trackingId, 'Booking Updated by Customer', {
+      await logTracking(bookingId, 'Booking Updated by Customer', {
         updatedBy: email,
         changes: updateData
       });
@@ -1327,18 +1290,18 @@ app.patch('/bookings/:id', verifyJWT, async (req, res) => {
 });
 
 
-app.get('/trackings/:trackingId/logs', async (req, res) => {
-  const trackingId = req.params.trackingId;
-  try {
-    const logs = await trackingCollection
-      .find({ trackingId })
-      .sort({ createdAt: 1 })
-      .toArray();
-    res.send(logs);
-  } catch (err) {
-    res.status(500).send({ message: 'Failed to fetch tracking logs' });
-  }
-});
+    app.get('/trackings/:trackingId/logs', async (req, res) => {
+      const trackingId = req.params.trackingId;
+      try {
+        const logs = await trackingCollection
+          .find({ trackingId })
+          .sort({ createdAt: 1 })
+          .toArray();
+        res.send(logs);
+      } catch (err) {
+        res.status(500).send({ message: 'Failed to fetch tracking logs' });
+      }
+    });
 
 
 
@@ -1389,8 +1352,8 @@ app.get('/trackings/:trackingId/logs', async (req, res) => {
 
 
     // Send a ping to confirm a successful connection
-    await client.db("admin").command({ ping: 1 });
-    console.log("Pinged your deployment. You successfully connected to MongoDB!");
+    // await client.db("admin").command({ ping: 1 });
+    // console.log("Pinged your deployment. You successfully connected to MongoDB!");
   } finally {
     // Ensures that the client will close when you finish/error
     // await client.close();
